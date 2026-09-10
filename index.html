@@ -2459,6 +2459,13 @@ $('#check-phone').onclick = async ()=>{
 $('#phone').addEventListener('keydown', e=>{ if(e.key==='Enter') $('#check-phone').click(); });
 
 $('#forgot-pw').onclick = ()=>{ pwMode = 'reset'; setPasswordStepText(); };
+$('#pw-eye').onclick = ()=>{
+  const inp = $('#password'), btn = $('#pw-eye');
+  const show = inp.type === 'password';
+  inp.type = show ? 'text' : 'password';
+  btn.textContent = show ? '🙈' : '👁️';
+  btn.classList.toggle('on', show);
+};
 $('#editphone').onclick = ()=>{ showStep('step-phone'); $('#phone').focus(); };
 
 $('#pw-submit').onclick = async ()=>{
