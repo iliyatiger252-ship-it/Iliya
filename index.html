@@ -401,6 +401,7 @@ body.pro .pitch-bg svg{stroke:rgba(233,230,243,.12)}
 .tilthint{text-align:center;color:var(--muted);font-size:12.5px;margin:2px 0 10px}
 .spinrow{display:flex;gap:8px;justify-content:center;margin-top:10px}
 .cardctl{display:flex;gap:10px;margin-top:6px}
+.vpnhint{color:var(--muted);font-size:12.5px;margin-top:8px;text-align:center}
 .cardctl .btn{margin-top:10px}
 .poschips,.stylechips{display:flex;flex-wrap:wrap;gap:8px;margin-top:4px}
 .chip{background:var(--card);border:1px solid var(--line);border-radius:999px;
@@ -615,6 +616,7 @@ body.pro .pitch-bg svg{stroke:rgba(233,230,243,.12)}
         <button class="btn ghost" id="pick-photo" data-i="card.pickPhoto"></button>
         <input type="file" id="photo-input" accept="image/*" style="display:none">
       </div>
+      <p class="vpnhint" data-i="card.vpnHint"></p>
 
       <div class="field">
         <label for="card-name" data-i="card.name"></label>
@@ -1103,6 +1105,7 @@ const T = {
       tiltHint:'انگشتتو روی کارت بکش تا آزادانه بچرخه ✨',
       spin:'چرخش ۳۶۰ 🔄', flip:'پشت کارت ↺',
       honesty:'با خودت صادق باش — آمارت رو واقعی بساز، نه الکی. کارتی که واقعاً خودتی جذاب‌تره 💚',
+      vpnHint:'برای حذف دقیق پس‌زمینه، بهتره VPN روشن باشه 🌐',
       vs:'به چالش دعوت کن ⚔️', accept:'آماده‌م، بزن بریم ⚔️', needName:'اول یه اسم برای کارتت بذار.',
       offline:'مشکلی پیش اومد، دوباره امتحان کن.', vsSaving:'در حال آماده‌سازی…',
       vsExplainTitle:'به چالش دعوت کن ⚔️',
@@ -1304,6 +1307,7 @@ const T = {
       tiltHint:'Drag across the card to spin it freely ✨',
       spin:'Spin 360 🔄', flip:'Flip ↺',
       honesty:'Be honest with yourself — build real stats, not made-up ones. A card that\u2019s truly you is more fun 💚',
+      vpnHint:'For accurate background removal, a VPN helps 🌐',
       vs:'Challenge a friend ⚔️', accept:'Ready, let\u2019s go ⚔️', needName:'Give your card a name first.',
       offline:'Something went wrong, try again.', vsSaving:'Getting ready…',
       vsExplainTitle:'Challenge a friend ⚔️',
@@ -3901,14 +3905,22 @@ function getFeathered(){
   const g = c.getContext('2d');
   g.drawImage(ph, 0, 0);
 
-  g.globalCompositeOperation = 'destination-out';
-  const W = c.width, H = c.height, fx = W*0.16, fy = H*0.12;
-  [[0,0,fx,0],[W,0,W-fx,0],[0,0,0,fy],[0,H,0,H-fy]].forEach(([x0,y0,x1,y1])=>{
-    const grad = g.createLinearGradient(x0,y0,x1,y1);
-    grad.addColorStop(0,'rgba(0,0,0,1)');
-    grad.addColorStop(1,'rgba(0,0,0,0)');
-    g.fillStyle = grad; g.fillRect(0,0,W,H);
-  });
+  // soft oval vignette: fades the photo out on every side at once, so it
+  // reads as an intentional portrait cutout rather than a cropped rectangle.
+  // No network, no AI model, no way for this to silently fail.
+  const W = c.width, H = c.height;
+  const cx = W/2, cy = H*0.46;
+  const rx = W*0.50, ry = H*0.56;
+  g.globalCompositeOperation = 'destination-in';
+  const grad = g.createRadialGradient(cx, cy, Math.min(rx,ry)*0.55, cx, cy, Math.max(rx,ry));
+  grad.addColorStop(0, 'rgba(0,0,0,1)');
+  grad.addColorStop(0.75, 'rgba(0,0,0,1)');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  g.save();
+  g.translate(cx, cy); g.scale(rx/Math.max(rx,ry), ry/Math.max(rx,ry)); g.translate(-cx, -cy);
+  g.fillStyle = grad;
+  g.fillRect(cx - Math.max(rx,ry)*2, cy - Math.max(rx,ry)*2, Math.max(rx,ry)*4, Math.max(rx,ry)*4);
+  g.restore();
   g.globalCompositeOperation = 'source-over';
 
   cardState._feather = c; cardState._featherFor = cardState.photo;
@@ -3924,70 +3936,20 @@ async function smartCutout(opts){
   const btn = $('#card-cutout');
   if(btn){ btn.disabled = true; btn.textContent = t('card.cutoutWorking'); }
   try{
-    const CDN = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
-    const mod = await import(CDN);
-    const vision = await mod.FilesetResolver.forVisionTasks(CDN + '/wasm');
-    const seg = await mod.ImageSegmenter.createFromOptions(vision, {
-      baseOptions:{ modelAssetPath:
-        'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/1/selfie_segmenter.tflite' },
-      runningMode:'IMAGE', outputCategoryMask:true, outputConfidenceMasks:false
+    const ph = cardState.photo;
+    const selfie = await getSegModel();
+    if(!selfie) throw new Error('segmentation library failed to load');
+    const results = await new Promise((resolve, reject) => {
+      const timer = setTimeout(()=>reject(new Error('segmentation timed out')), 15000);
+      selfie.onResults(r => { clearTimeout(timer); resolve(r); });
+      selfie.send({ image: ph }).catch(reject);
     });
 
-    const ph = cardState.photo;
-    const res = seg.segment(ph);
-    const cm = res.categoryMask;
-    const mw = cm.width, mh = cm.height;
-    const raw = cm.getAsUint8Array();
-
-    const mcv = document.createElement('canvas');
-    mcv.width = mw; mcv.height = mh;
-    const mctx = mcv.getContext('2d');
-    const idata = mctx.createImageData(mw, mh);
-
-    // Which label means "person"? Don't assume — sample the middle of the
-    // frame, which in a cropped portrait is overwhelmingly the person, and
-    // take whichever label dominates there. Works whichever way round the
-    // model numbers its classes.
-    const cx0 = Math.floor(mw*0.32), cx1 = Math.ceil(mw*0.68);
-    const cy0 = Math.floor(mh*0.12), cy1 = Math.ceil(mh*0.62);
-    const centre = {};
-    for(let y=cy0; y<cy1; y++){
-      for(let x=cx0; x<cx1; x++){
-        const v = raw[y*mw + x];
-        centre[v] = (centre[v] || 0) + 1;
-      }
-    }
-    let personVal = 0, best = -1;
-    Object.keys(centre).forEach(k=>{ if(centre[k] > best){ best = centre[k]; personVal = +k; } });
-
-    let personCount = 0;
-    for(let i=0;i<mw*mh;i++){
-      const isPerson = raw[i] === personVal;
-      if(isPerson) personCount++;
-      idata.data[i*4] = 255; idata.data[i*4+1] = 255; idata.data[i*4+2] = 255;
-      idata.data[i*4+3] = isPerson ? 255 : 0;
-    }
-
-    // Safety net: a sane portrait cutout keeps somewhere between 8% and 85%
-    // of the frame. Anything outside that means the mask is wrong, so we keep
-    // the untouched photo rather than showing a broken card.
-    const kept = personCount / (mw*mh);
-    if(kept < 0.08 || kept > 0.85){
-      throw new Error('implausible mask coverage: ' + kept.toFixed(3));
-    }
-    mctx.putImageData(idata, 0, 0);
-
-    // erode the mask by one pixel: keeps a hard, clean edge with no
-    // leftover halo of background colour around the head and shoulders
+    // segmentationMask is already a soft grayscale map — bright = person,
+    // dark = background — based on body shape, not skin tone or wall colour.
     const eroded = document.createElement('canvas');
-    eroded.width = mw; eroded.height = mh;
-    const ectx = eroded.getContext('2d');
-    ectx.drawImage(mcv, 0, 0);
-    ectx.globalCompositeOperation = 'destination-in';
-    [[1,0],[-1,0],[0,1],[0,-1]].forEach(([dx,dy])=>ectx.drawImage(mcv, dx, dy));
-    ectx.globalCompositeOperation = 'source-over';
-    try{ cm.close(); if(res.close) res.close(); }catch(e){}
-    seg.close();
+    eroded.width = ph.width; eroded.height = ph.height;
+    eroded.getContext('2d').drawImage(results.segmentationMask, 0, 0, ph.width, ph.height);
 
     // blur the mask alone, in plain source-over — no composite tricks yet
     const softMask = document.createElement('canvas');
@@ -4683,7 +4645,7 @@ $('#crop-ok').onclick = ()=>{
     cardState.photo = cropped;
     cardState.cutout = null; cardState._feather = null;
     updateCutoutBtn(); drawCard();
-    smartCutout({auto:true});   // runs silently, no toggle button to babysit
+    smartCutout({auto:true});
   };
   cropped.src = out.toDataURL('image/png');
   $('#crop-modal').classList.remove('open');
